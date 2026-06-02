@@ -19,12 +19,29 @@ Prometheus collector and exporter for metrics extracted from the [Slurm](https:/
 * **Allocated**: GPUs which have been allocated to a job.
 * **Other**: GPUs which are unavailable for use at the moment.
 * **Total**: total number of GPUs.
-* **Utilization**: total GPU utiliazation on the cluster.
+* **Utilization**: total GPU utilization on the cluster.
+* **Unavailable**: GPUs on nodes in drain, down or maintenance state.
 
 - Information extracted from the SLURM [**sinfo**](https://slurm.schedmd.com/sinfo.html) and [**sacct**](https://slurm.schedmd.com/sacct.html) command.
 - [Slurm GRES scheduling](https://slurm.schedmd.com/gres.html)
 
 **NOTE**: since version **0.19**, GPU accounting has to be **explicitly** enabled adding the _-gpus-acct_ option to the command line otherwise it will not be activated.
+
+When GPU accounting is enabled, the exporter also exposes per-job, per-partition and per-job-group GPU details:
+
+| Metric | Description |
+|--------|-------------|
+| `slurm_gpus_unavailable` | GPUs on unavailable nodes |
+| `slurm_gpus_by_job_group` | Allocated GPUs grouped by the job name prefix before `-` |
+| `slurm_gpus_allocated_to_job` | Allocated GPUs for each running job, labelled by `job_id`, `job_name`, `nodes` and `partition` |
+| `slurm_job_gpu_utilization_pct` | Average GPU utilization for each running job from DCGM exporter; `-1` when unavailable |
+| `slurm_job_gpu_memory_used_mb` | Average GPU memory used for each running job from DCGM exporter; `-1` when unavailable |
+| `slurm_partition_gpu_utilization_pct` | Average GPU utilization across all GPUs in each partition |
+| `slurm_partition_allocated_gpu_utilization_pct` | Average GPU utilization across allocated GPUs in each partition |
+| `slurm_job_group_gpu_utilization_pct` | Average GPU utilization by job group |
+| `slurm_job_group_gpu_memory_used_mb` | Average GPU memory used by job group |
+
+GPU utilization and memory metrics scrape [NVIDIA DCGM exporter](https://github.com/NVIDIA/dcgm-exporter) on GPU nodes. Use `-dcgm-exporter-port` when it is not listening on the default `9400` port. Use `-gpu-partitions` to restrict GPU metrics and related `slurm_node_*` job metrics to specific partitions.
 
 Be aware that:
 
@@ -54,9 +71,71 @@ Since version **0.18**, the following information are also extracted and exporte
 
 * CPUs: how many are _allocated_, _idle_, _other_ and in _total_.
 * Memory: _allocated_ and in _total_.
+* GPUs: _allocated_ and in _total_ when Slurm reports GRES/TRES GPU data.
+* Partitions: exported as `slurm_node_partition{node,partition}` with value `1`.
 * Labels: hostname and its Slurm status (e.g. _idle_, _mix_, _allocated_, _draining_, etc.).
 
 See the related [test data](https://github.com/vpenso/prometheus-slurm-exporter/blob/master/test_data/sinfo_mem.txt) to check the format of the information extracted from Slurm.
+
+#### Running jobs per node
+
+For each **RUNNING** job and each allocated node, the exporter exposes:
+
+| Metric | Description |
+|--------|-------------|
+| `slurm_node_job_allocated_cpus` | CPU cores (multi-node jobs: total CPUs split evenly over the expanded nodelist) |
+| `slurm_node_job_allocated_memory_mib` | Memory (MiB per node from squeue/scontrol min-memory data, with sacct fallback) |
+| `slurm_node_job_allocated_gpus` | GPUs on that node (from sacct `AllocTRES`, split like CPUs unless TRES bind lists per-node indices) |
+| `slurm_node_job_gpu_indices` | Value `1`; label `gpu_indices` = comma-separated GPU indices from `scontrol` GRES detail or squeue TRES bind (`none` if unknown) |
+
+Labels: `node`, `job_id`, `job_name` (plus `gpu_indices` on the last metric). Uses [**squeue**](https://slurm.schedmd.com/squeue.html) and [**sacct**](https://slurm.schedmd.com/sacct.html). Respects **-gpu-partitions** when set (same filter as other node/GPU metrics).
+
+#### Running jobs (cluster-wide, for dashboards)
+
+The same scrape pass also emits **job-level** series (user, QoS, start time, totals):
+
+| Metric | Value | Labels |
+|--------|-------|--------|
+| `slurm_job_info` | `1` | `job_id`, `job_name`, `partition`, `user`, `qos`, `state` (always `running`), `nodes`, `start_time`, `run_time` (raw `scontrol` strings) |
+| `slurm_job_start_time_seconds` | Unix seconds from `StartTime`; `0` if unknown | `job_id`, `job_name`, `partition` |
+| `slurm_job_allocated_cpus` | Total CPUs | `job_id`, `job_name`, `partition` |
+| `slurm_job_allocated_memory_mib` | Total MiB (sum over nodes) | `job_id`, `job_name`, `partition` |
+| `slurm_job_allocated_gpus` | Total GPUs | `job_id`, `job_name`, `partition` |
+
+**Grafana:** `slurm_job_info{state="running"}`. **Elapsed:** `time() - slurm_job_start_time_seconds` (ignore `0` start). **Memory (GB):** `slurm_job_allocated_memory_mib / 1024`. **Partition variable:** `label_values(slurm_job_info, partition)`.
+
+#### Pending jobs detail
+
+When started with `-pending-jobs`, the exporter emits detailed metrics for currently **PENDING** jobs:
+
+| Metric | Value | Labels |
+|--------|-------|--------|
+| `slurm_pending_job_info` | `1` | `job_id`, `job_name`, `partition`, `user`, `qos`, `reason`, `requested_node`, `state` |
+| `slurm_pending_job_req_cpus` | Requested CPU cores per GPU from `scontrol`; `0` if unknown | `job_id`, `partition` |
+| `slurm_pending_job_req_memory_mib` | Requested memory per CPU in MiB | `job_id`, `partition` |
+| `slurm_pending_job_req_gpus` | Requested GPUs | `job_id`, `partition` |
+| `slurm_pending_job_submit_time_seconds` | Submit time as Unix seconds | `job_id`, `partition` |
+| `slurm_pending_job_expected_start_time_seconds` | Expected start time as Unix seconds; `0` if unknown | `job_id`, `partition` |
+
+Data is merged from [**squeue**](https://slurm.schedmd.com/squeue.html) and [**scontrol show job**](https://slurm.schedmd.com/scontrol.html). The `-gpu-partitions` filter applies when set.
+
+#### Completed jobs detail
+
+When started with `-completed-jobs`, the exporter emits a recent terminal-job snapshot from [**sacct**](https://slurm.schedmd.com/sacct.html):
+
+| Metric | Value | Labels |
+|--------|-------|--------|
+| `slurm_job_completed_info` | `1` | `job_id`, `job_name`, `partition`, `user`, `qos`, `state`, `nodes` |
+| `slurm_job_completed_start_time_seconds` | Start time as Unix seconds | `job_id`, `partition` |
+| `slurm_job_completed_end_time_seconds` | End time as Unix seconds | `job_id`, `partition` |
+| `slurm_job_completed_runtime_seconds` | Runtime in seconds | `job_id`, `partition` |
+| `slurm_job_completed_allocated_cpus` | Allocated CPU cores | `job_id`, `partition` |
+| `slurm_job_completed_allocated_memory_mib` | Allocated memory in MiB | `job_id`, `partition` |
+| `slurm_job_completed_allocated_gpus` | Allocated GPUs | `job_id`, `partition` |
+| `slurm_job_completed_gpu_utilization_avg_pct` | Average GPU utilization accumulated while the job was running; `-1` when unavailable | `job_id`, `partition` |
+| `slurm_job_completed_gpu_memory_used_avg_mb` | Average GPU memory used accumulated while the job was running; `-1` when unavailable | `job_id`, `partition` |
+
+Use `-completed-jobs-lookback`, `-completed-jobs-states`, `-completed-jobs-sample-interval` and `-completed-jobs-cache-ttl` to control the sacct lookback window, terminal states and in-memory GPU average cache. The `-gpu-partitions` filter applies when set.
 
 ### Status of the Jobs
 
@@ -114,6 +193,19 @@ counted with this parameter almost always indicates three issues:
 
 Collect _share_ statistics for every Slurm account. Refer to the [manpage of the sshare command](https://slurm.schedmd.com/sshare.html) to get more information.
 
+### Scratch Filesystem Usage
+
+The exporter can also expose filesystem usage for a scratch directory by running `df -P -B1`:
+
+| Metric | Description |
+|--------|-------------|
+| `scratch_size_bytes` | Total size of the filesystem in bytes |
+| `scratch_used_bytes` | Used space in bytes |
+| `scratch_avail_bytes` | Available space in bytes |
+| `scratch_usage_percent` | Usage percentage from `df` |
+
+The monitored path is configured with `-directory-path`. Set it to an empty string to disable scratch metrics.
+
 ## Installation
 
 * Read [DEVELOPMENT.md](DEVELOPMENT.md) in order to build the Prometheus Slurm Exporter. After a successful build copy the executable
@@ -124,6 +216,24 @@ Collect _share_ statistics for every Slurm account. Refer to the [manpage of the
 * (**optional**) Distribute the exporter as a Snap package: consult the [following document](packages/snap/README.md). **NOTE**: this method requires the use of [Snap](https://snapcraft.io), which is built by [Canonical](https://canonical.com).
 
 [sdu]: https://www.freedesktop.org/software/systemd/man/systemd.service.html
+
+## Runtime Options
+
+Common runtime options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-listen-address` | `:8080` | Address used by the HTTP `/metrics` endpoint |
+| `-gpus-acct` | `false` | Enable GPU accounting and DCGM-backed GPU utilization/memory metrics |
+| `-gpu-partitions` | empty | Comma-separated Slurm partitions used to filter GPU metrics and related node/job metrics |
+| `-dcgm-exporter-port` | `9400` | DCGM exporter port on GPU nodes |
+| `-directory-path` | `` | Scratch filesystem path to monitor; empty disables scratch metrics |
+| `-pending-jobs` | `false` | Enable detailed pending-job metrics |
+| `-completed-jobs` | `false` | Enable completed-job snapshot metrics |
+| `-completed-jobs-lookback` | `168h` | How far back to query terminal jobs via `sacct` |
+| `-completed-jobs-cache-ttl` | `720h` | TTL for the in-memory completed-job GPU average cache |
+| `-completed-jobs-sample-interval` | `30s` | Sampling interval for running-job GPU utilization and memory accumulation |
+| `-completed-jobs-states` | `COMPLETED,FAILED,CANCELLED,TIMEOUT,NODE_FAIL,PREEMPTED,OUT_OF_MEMORY` | Terminal job states included in completed-job metrics |
 
 ## Prometheus Configuration for the SLURM exporter
 

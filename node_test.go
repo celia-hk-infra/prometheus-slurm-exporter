@@ -22,24 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-/*
-For this example data line:
-
-a048,79384,193000,3/13/0/16,mix
-
-We want output that looks like:
-
-slurm_node_cpus_allocated{name="a048",status="mix"} 3
-slurm_node_cpus_idle{name="a048",status="mix"} 3
-slurm_node_cpus_other{name="a048",status="mix"} 0
-slurm_node_cpus_total{name="a048",status="mix"} 16
-slurm_node_mem_allocated{name="a048",status="mix"} 179384
-slurm_node_mem_total{name="a048",status="mix"} 193000
-
-*/
-
 func TestNodeMetrics(t *testing.T) {
-	// Read the input data from a file
 	data, err := ioutil.ReadFile("test_data/sinfo_mem.txt")
 	if err != nil {
 		t.Fatalf("Can not open test data: %v", err)
@@ -54,4 +37,74 @@ func TestNodeMetrics(t *testing.T) {
 	assert.Equal(t, uint64(0), metrics["b001"].cpuIdle)
 	assert.Equal(t, uint64(0), metrics["b001"].cpuOther)
 	assert.Equal(t, uint64(32), metrics["b001"].cpuTotal)
+}
+
+func TestNodeMetricsParsableGPU(t *testing.T) {
+	line := "gpu001|409600|524288|96/32/0/128|mixed|gpu|gpu:8(S:0-1)|cpu=96,mem=409600,gres/gpu=6\n"
+	metrics := ParseNodeMetrics([]byte(line))
+	assert.Contains(t, metrics, "gpu001")
+	g := metrics["gpu001"]
+	assert.Equal(t, uint64(409600), g.memAlloc)
+	assert.Equal(t, uint64(524288), g.memTotal)
+	assert.Equal(t, uint64(96), g.cpuAlloc)
+	assert.Equal(t, uint64(32), g.cpuIdle)
+	assert.Equal(t, uint64(128), g.cpuTotal)
+	assert.Equal(t, "mixed", g.nodeStatus)
+	assert.Equal(t, []string{"gpu"}, g.partitions)
+	assert.Equal(t, uint64(8), g.gpuTotal)
+	assert.Equal(t, uint64(6), g.gpuAlloc)
+}
+
+func TestNormalizeNodeState(t *testing.T) {
+	assert.Equal(t, "mix", normalizeNodeState("mixed"))
+	assert.Equal(t, "mix", normalizeNodeState("MIXED*"))
+	assert.Equal(t, "alloc", normalizeNodeState("allocated"))
+	assert.Equal(t, "idle", normalizeNodeState("idle"))
+}
+
+func TestParseScontrolShowNode(t *testing.T) {
+	prev := gpuPartitionsFilter
+	defer func() { gpuPartitionsFilter = prev }()
+	gpuPartitionsFilter = ""
+
+	data, err := ioutil.ReadFile("test_data/scontrol_show_node.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := ParseScontrolShowNode(data)
+	assert.Contains(t, n, "gpu001")
+	assert.Equal(t, uint64(96), n["gpu001"].cpuAlloc)
+	assert.Equal(t, uint64(128), n["gpu001"].cpuTotal)
+	assert.Equal(t, uint64(409600), n["gpu001"].memAlloc)
+	assert.Equal(t, uint64(524288), n["gpu001"].memTotal)
+	assert.Equal(t, uint64(6), n["gpu001"].gpuAlloc)
+	assert.Equal(t, uint64(8), n["gpu001"].gpuTotal)
+	assert.Contains(t, n["gpu001"].partitions, "gpu")
+	assert.Contains(t, n, "gpu002")
+	assert.Equal(t, uint64(0), n["gpu002"].gpuAlloc)
+	assert.Equal(t, uint64(4), n["gpu002"].gpuTotal)
+}
+
+func TestParseScontrolShowNodePartitionFilter(t *testing.T) {
+	prev := gpuPartitionsFilter
+	defer func() { gpuPartitionsFilter = prev }()
+	data, err := ioutil.ReadFile("test_data/scontrol_show_node.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gpuPartitionsFilter = "gpu-long"
+	n := ParseScontrolShowNode(data)
+	assert.Contains(t, n, "gpu001")
+	assert.NotContains(t, n, "gpu002")
+}
+
+func TestNodePartitionLabels(t *testing.T) {
+	prev := gpuPartitionsFilter
+	defer func() { gpuPartitionsFilter = prev }()
+
+	gpuPartitionsFilter = "gpu,gpu-long"
+	assert.Equal(t, []string{"gpu", "gpu-long"}, nodePartitionLabels(&NodeMetrics{}))
+	gpuPartitionsFilter = "gpu"
+	assert.Equal(t, []string{"gpu"}, nodePartitionLabels(&NodeMetrics{}))
+	assert.Equal(t, []string{"from-sinfo"}, nodePartitionLabels(&NodeMetrics{partitions: []string{"from-sinfo"}}))
 }
