@@ -68,6 +68,7 @@ type CompletedJobsCollector struct {
 	states         map[string]struct{}
 
 	mu               sync.Mutex
+	sampleMu         sync.Mutex
 	running          map[string]*runningJobGPUState
 	finalized        map[string]finalizedJobGPUState
 	lastSampleRunSec float64
@@ -277,6 +278,9 @@ func parseCompletedJobLine(line string, terminalStates map[string]struct{}) (Com
 }
 
 func (c *CompletedJobsCollector) captureRunningGPUState(now float64) {
+	c.sampleMu.Lock()
+	defer c.sampleMu.Unlock()
+
 	snapshot := newGPUScrapeSnapshot()
 	utilByJob := make(map[string]float64)
 	memByJob := make(map[string]float64)

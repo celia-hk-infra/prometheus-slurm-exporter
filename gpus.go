@@ -18,10 +18,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os/exec"
+	"syscall"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +61,13 @@ func SetDCGMExporterPort(port string) {
 	if p != "" {
 		dcgmExporterPort = p
 	}
+}
+
+func isTooManyOpenFilesErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE)
 }
 
 func GPUsGetMetrics() *GPUsMetrics {
@@ -377,6 +387,10 @@ func parseDCGMMemoryPerGPU(body []byte) map[string]float64 {
 var dcgmHTTPClient = &http.Client{
 	Timeout: 3 * time.Second,
 	Transport: &http.Transport{
+		MaxIdleConns:        32,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     30 * time.Second,
+		DisableKeepAlives:   false,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			d := net.Dialer{Timeout: 2 * time.Second}
 			return d.DialContext(ctx, network, addr)
@@ -397,6 +411,9 @@ func fetchDCGMMetrics(node string) ([]byte, error) {
 	}
 	resp, err := dcgmHTTPClient.Do(req)
 	if err != nil {
+		if isTooManyOpenFilesErr(err) {
+			return nil, err
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -404,7 +421,7 @@ func fetchDCGMMetrics(node string) ([]byte, error) {
 		return nil, fmt.Errorf("status %s", resp.Status)
 	}
 	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(resp.Body); err != nil {
+	if _, err := io.Copy(&buf, resp.Body); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -814,6 +831,9 @@ func getJobGPUUtilFromSnapshot(snapshot *gpuScrapeSnapshot) []JobGPUUtil {
 			expandedNodes = append(expandedNodes, nodeName)
 			perGPU, err := snapshot.dcgm.gpuUtilPerGPU(nodeName)
 			if err != nil {
+				if isTooManyOpenFilesErr(err) {
+					return out
+				}
 				allOk = false
 				break
 			}
@@ -879,6 +899,9 @@ func getJobGroupGPUUtilFromSnapshot(snapshot *gpuScrapeSnapshot) []JobGroupGPUUt
 			}
 			perGPU, err := snapshot.dcgm.gpuUtilPerGPU(nodeName)
 			if err != nil {
+				if isTooManyOpenFilesErr(err) {
+					return nil
+				}
 				log.Warnf("DCGM exporter scrape failed on node %s for job %s: %v", nodeName, job.JobID, err)
 				continue
 			}
@@ -947,6 +970,9 @@ func getJobGroupGPUMemoryFromSnapshot(snapshot *gpuScrapeSnapshot) []JobGroupGPU
 			}
 			perGPU, err := snapshot.dcgm.gpuMemoryPerGPU(nodeName)
 			if err != nil {
+				if isTooManyOpenFilesErr(err) {
+					return nil
+				}
 				log.Warnf("DCGM exporter scrape failed on node %s (job group GPU memory): %v", nodeName, err)
 				continue
 			}
@@ -1009,6 +1035,9 @@ func getJobGPUMemoryUtilFromSnapshot(snapshot *gpuScrapeSnapshot) []JobGPUMemory
 			expandedNodes = append(expandedNodes, nodeName)
 			perGPU, err := snapshot.dcgm.gpuMemoryPerGPU(nodeName)
 			if err != nil {
+				if isTooManyOpenFilesErr(err) {
+					return out
+				}
 				allOk = false
 				break
 			}
@@ -1158,6 +1187,9 @@ func getPartitionAvgGPUUtilFromSnapshot(snapshot *gpuScrapeSnapshot) map[string]
 		}
 		perGPU, err := snapshot.dcgm.gpuUtilPerGPU(nodeName) // reads DCGM_FI_DEV_GPU_UTIL per GPU
 		if err != nil {
+			if isTooManyOpenFilesErr(err) {
+				return out
+			}
 			log.Warnf("DCGM exporter scrape failed on node %s: %v", nodeName, err)
 			continue
 		}
@@ -1220,6 +1252,9 @@ func getPartitionAllocatedAvgGPUUtilFromSnapshot(snapshot *gpuScrapeSnapshot) ma
 			}
 			perGPU, err := snapshot.dcgm.gpuUtilPerGPU(nodeName)
 			if err != nil {
+				if isTooManyOpenFilesErr(err) {
+					return out
+				}
 				log.Warnf("DCGM exporter scrape failed on node %s (partition allocated util): %v", nodeName, err)
 				continue
 			}
@@ -1343,6 +1378,12 @@ func (cc *GPUsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- cc.jobGroupGPUMemory
 }
 func (cc *GPUsCollector) Collect(ch chan<- prometheus.Metric) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Warnf("GPU collector recovered from panic: %v", r)
+		}
+	}()
+
 	snapshot := newGPUScrapeSnapshot()
 	cm := gpuMetricsFromSnapshot(snapshot)
 	ch <- prometheus.MustNewConstMetric(cc.alloc, prometheus.GaugeValue, cm.alloc)
