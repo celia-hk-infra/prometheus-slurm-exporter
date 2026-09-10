@@ -48,7 +48,7 @@ var gpuPartitionsFilter string
 var dcgmExporterPort = "9400"
 
 // default job groups
-var defaultJobGroupName = []string{"VGEN", "BOOGU", "IVTR", "STRM", "AGNT", "DLM", "OTH"}
+var defaultJobGroupName = []string{"WOMO", "BOOGU", "IVTR", "STRM", "AGNT", "DLM", "OTH"}
 
 // SetGPUPartitions sets the partition filter for GPU metrics (e.g. "gpu,gpu-long"). Call before registering GPUsCollector.
 func SetGPUPartitions(partitions string) {
@@ -142,7 +142,7 @@ func ParseGPUsByJobGroup() map[string]float64 {
 		if line == "" {
 			continue
 		}
-		// parsable2: JobName|AllocTRES (e.g. "VGEN-zq-|gres/gpu=1" or "BOOGU-zi|cpu=2,mem=4096,gres/gpu=1")
+		// parsable2: JobName|AllocTRES (e.g. "STRM-zq-|gres/gpu=1" or "BOOGU-zi|cpu=2,mem=4096,gres/gpu=1")
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) != 2 {
 			continue
